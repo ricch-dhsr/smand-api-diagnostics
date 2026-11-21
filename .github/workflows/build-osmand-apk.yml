@@ -24,8 +24,6 @@ jobs:
           old = s[start:end]
           assert 'aidlHelper.addMapPoint(' in old and 'location.name.substring(0, 1)' in old
           replacement = '''ApiActionType.AIDL_ADD_MAP_POINT -> {
-                                  // Build #7: 25 separate images and AIDL map points.
-                                  // Use the chosen demo city as the center of a 5x5 test grid.
                                   for (stop in 1..25) {
                                       val row = (stop - 1) / 5
                                       val col = (stop - 1) % 5
@@ -56,7 +54,7 @@ jobs:
                                       aidlHelper.addMapPoint(
                                           MAP_LAYER_ID,
                                           "test_stop_$stop",
-                                          "", // Avoid duplicate tiny caption beneath icon.
+                                          "",
                                           "Test Stop $stop",
                                           "Delivery stop",
                                           Color.BLUE,
@@ -66,7 +64,7 @@ jobs:
                                       )
                                   }
                               }
-                              '''" + "'''" + r'''
+                              '''
           s = s[:start] + replacement + s[end:]
           start = s.index('ApiActionType.AIDL_REMOVE_MAP_POINT -> {')
           end = s.index('ApiActionType.AIDL_TAKE_PHOTO -> {', start)
@@ -76,13 +74,12 @@ jobs:
                                   for (stop in 1..25) {
                                       aidlHelper.removeMapPoint(MAP_LAYER_ID, "test_stop_$stop")
                                   }
-                                  // Also clean up the earlier single-marker test, if present.
                                   aidlHelper.removeMapPoint(MAP_LAYER_ID, "id_" + location.name)
                               }
-                              '''" + "'''" + r'''
+                              '''
           s = s[:start] + replacement + s[end:]
           p.write_text(s)
-          print('Build #7 patch applied: 25 distinct numbered icons and matching remove action')
+          print('25-marker Kotlin patch applied')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
