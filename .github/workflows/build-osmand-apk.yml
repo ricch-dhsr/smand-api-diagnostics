@@ -13,73 +13,160 @@ jobs:
         run: |
           mkdir -p source
           unzip -q .github/workflows/osmand-api-demo-diagnostics-v1.zip -d source
-      - name: Add 25 numbered image markers test
+      - name: Add Tasker route intent and GPX overview
         run: |
           python3 - <<'PYCODE'
           from pathlib import Path
-          p = Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/MainActivity.kt')
-          s = p.read_text()
-          start = s.index('ApiActionType.AIDL_ADD_MAP_POINT -> {')
-          end = s.index('ApiActionType.AIDL_UPDATE_MAP_POINT -> {', start)
-          old = s[start:end]
-          assert 'aidlHelper.addMapPoint(' in old and 'location.name.substring(0, 1)' in old
-          replacement = '''ApiActionType.AIDL_ADD_MAP_POINT -> {
-                                  for (stop in 1..25) {
-                                      val row = (stop - 1) / 5
-                                      val col = (stop - 1) % 5
-                                      val lat = location.lat + (row - 2) * 0.004
-                                      val lon = location.lon + (col - 2) * 0.005
-                                      val iconFile = java.io.File(cacheDir, "icons/numbered-stop-$stop.png")
-                                      iconFile.parentFile?.mkdirs()
-                                      val iconBitmap = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
-                                      val iconCanvas = android.graphics.Canvas(iconBitmap)
-                                      val circlePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-                                      circlePaint.color = android.graphics.Color.rgb(25, 118, 210)
-                                      iconCanvas.drawCircle(128f, 128f, 122f, circlePaint)
-                                      val numberPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-                                      numberPaint.color = android.graphics.Color.WHITE
-                                      numberPaint.textAlign = android.graphics.Paint.Align.CENTER
-                                      numberPaint.typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
-                                      numberPaint.textSize = if (stop < 10) 174f else 138f
-                                      val baseline = 128f - (numberPaint.ascent() + numberPaint.descent()) / 2f
-                                      iconCanvas.drawText(stop.toString(), 128f, baseline, numberPaint)
-                                      java.io.FileOutputStream(iconFile).use { stream ->
-                                          iconBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
-                                      }
-                                      iconBitmap.recycle()
-                                      val iconUri = androidx.core.content.FileProvider.getUriForFile(
-                                          this, "net.osmand.osmandapidemo.fileprovider", iconFile)
-                                      grantUriPermission("net.osmand.plus", iconUri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                      grantUriPermission("net.osmand", iconUri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                      aidlHelper.addMapPoint(
-                                          MAP_LAYER_ID,
-                                          "test_stop_$stop",
-                                          "",
-                                          "Test Stop $stop",
-                                          "Delivery stop",
-                                          Color.BLUE,
-                                          ALatLon(lat, lon),
-                                          listOf("Test marker $stop", "Build #7"),
-                                          mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to iconUri.toString())
-                                      )
-                                  }
-                              }
-                              '''
-          s = s[:start] + replacement + s[end:]
-          start = s.index('ApiActionType.AIDL_REMOVE_MAP_POINT -> {')
-          end = s.index('ApiActionType.AIDL_TAKE_PHOTO -> {', start)
-          old = s[start:end]
-          assert 'aidlHelper.removeMapPoint(MAP_LAYER_ID, "id_" + location.name)' in old
-          replacement = '''ApiActionType.AIDL_REMOVE_MAP_POINT -> {
-                                  for (stop in 1..25) {
-                                      aidlHelper.removeMapPoint(MAP_LAYER_ID, "test_stop_$stop")
-                                  }
-                                  aidlHelper.removeMapPoint(MAP_LAYER_ID, "id_" + location.name)
-                              }
-                              '''
-          s = s[:start] + replacement + s[end:]
+          p=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/MainActivity.kt')
+          s=p.read_text()
+          # Keep the proven original demo marker buttons and append an independent intent route flow.
+          needle='    override fun onCreate(savedInstanceState: Bundle?) {'
+          assert s.count(needle)==1
+          feature=r'''
+              // Experimental one-route Tasker integration. Not a road-calculated route.
+              private val taskerRouteAction = "net.osmand.osmandapidemo.SHOW_ROUTE"
+              private val taskerRouteLayer = "tasker_route_am"
+              private var routeRequestId = 0
+          
+              private fun acceptTaskerRoute(incoming: Intent?) {
+                  if (incoming?.action != taskerRouteAction) return
+                  val raw = incoming.getStringExtra("route_json")
+                  if (raw.isNullOrBlank()) {
+                      Toast.makeText(this, "Missing route_json", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val route: org.json.JSONObject
+                  val stops: org.json.JSONArray
+                  try {
+                      route = org.json.JSONObject(raw)
+                      stops = route.getJSONArray("stops")
+                      require(stops.length() in 1..50) { "Expected 1-50 stops" }
+                      for (i in 0 until stops.length()) {
+                          val stop = stops.getJSONObject(i)
+                          val lat = stop.getDouble("lat")
+                          val lon = stop.getDouble("lon")
+                          require(lat in -90.0..90.0 && lon in -180.0..180.0) { "Invalid GPS coordinate" }
+                          require(stop.getString("address").isNotBlank()) { "Missing address" }
+                      }
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Invalid route JSON: ${e.message}", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val request = ++routeRequestId
+                  applyTaskerRouteWhenReady(route, stops, request, 0)
+              }
+          
+              private fun applyTaskerRouteWhenReady(route: org.json.JSONObject, stops: org.json.JSONArray,
+                                                    request: Int, attempt: Int) {
+                  if (request != routeRequestId || isFinishing || isDestroyed) return
+                  val aidl = mAidlHelper
+                  if (aidl == null || !(aidl.addMapLayer(taskerRouteLayer, "AM Delivery Route", 5.5f, null, true) ||
+                          aidl.updateMapLayer(taskerRouteLayer, "AM Delivery Route", 5.5f, null, true))) {
+                      if (attempt < 30) {
+                          android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                              applyTaskerRouteWhenReady(route, stops, request, attempt + 1)
+                          }, 500)
+                      } else {
+                          Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
+                      }
+                      return
+                  }
+                  val previousCount = getPreferences(MODE_PRIVATE).getInt("am_stop_count", 0)
+                  for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "am_stop_$n")
+                  val blue = android.graphics.Color.rgb(25, 118, 210)
+                  var successful = 0
+                  for (i in 0 until stops.length()) {
+                      val n = i + 1
+                      val stop = stops.getJSONObject(i)
+                      val address = stop.getString("address")
+                      val iconFile = java.io.File(filesDir, "route_icons/am_stop_$n.png")
+                      iconFile.parentFile?.mkdirs()
+                      val bitmap = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
+                      val canvas = android.graphics.Canvas(bitmap)
+                      val circle = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                      circle.color = blue
+                      canvas.drawCircle(128f, 128f, 122f, circle)
+                      val number = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                      number.color = android.graphics.Color.WHITE
+                      number.textAlign = android.graphics.Paint.Align.CENTER
+                      number.typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+                      number.textSize = if (n < 10) 174f else 138f
+                      canvas.drawText(n.toString(), 128f, 128f - (number.ascent() + number.descent()) / 2f, number)
+                      java.io.FileOutputStream(iconFile).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                      bitmap.recycle()
+                      val uri = androidx.core.content.FileProvider.getUriForFile(
+                          this, "net.osmand.osmandapidemo.fileprovider", iconFile)
+                      grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      if (aidl.addMapPoint(taskerRouteLayer, "am_stop_$n", "", address,
+                              "AM Stop $n", blue,
+                              ALatLon(stop.getDouble("lat"), stop.getDouble("lon")),
+                              listOf("Stop $n", address),
+                              mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))) successful++
+                  }
+                  getPreferences(MODE_PRIVATE).edit().putInt("am_stop_count", stops.length()).apply()
+                  // GPX track is a straight-line overview, NOT road-following geometry.
+                  // It is deliberately separate from OsmAnd turn-by-turn navigation.
+                  try {
+                      val gpx = java.io.File(filesDir, "tasker_am_overview.gpx")
+                      val xml = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+                          "<gpx version=\"1.1\" creator=\"Tasker Route Demo\" xmlns=\"http://www.topografix.com/GPX/1/1\"><trk><name>AM Overview</name><trkseg>")
+                      for (i in 0 until stops.length()) {
+                          val stop = stops.getJSONObject(i)
+                          xml.append("<trkpt lat=\"").append(stop.getDouble("lat"))
+                              .append("\" lon=\"").append(stop.getDouble("lon")).append("\"/>")
+                      }
+                      xml.append("</trkseg></trk></gpx>")
+                      gpx.writeText(xml.toString())
+                      val uri = androidx.core.content.FileProvider.getUriForFile(
+                          this, "net.osmand.osmandapidemo.fileprovider", gpx)
+                      grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      aidl.removeGpx("tasker_am_overview.gpx")
+                      aidl.importGpxFromUri(uri, "tasker_am_overview.gpx", "blue", true)
+                  } catch (e: Exception) {
+                      android.util.Log.e("TaskerRoute", "GPX overview import failed", e)
+                  }
+                  val first = stops.getJSONObject(0)
+                  aidl.setMapLocation(first.getDouble("lat"), first.getDouble("lon"), 12, 0f, true)
+                  aidl.refreshMap()
+                  Toast.makeText(this, "AM route: $successful/${stops.length()} markers", Toast.LENGTH_LONG).show()
+                  val osmandIntent = packageManager.getLaunchIntentForPackage("net.osmand.plus")
+                      ?: packageManager.getLaunchIntentForPackage("net.osmand")
+                  if (osmandIntent != null) {
+                      osmandIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(osmandIntent)
+                  } else Toast.makeText(this, "Open OsmAnd manually", Toast.LENGTH_LONG).show()
+              }
+          
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  acceptTaskerRoute(intent)
+              }
+          
+          '''
+          s=s.replace(needle,feature+needle,1)
+          needle='        mAidlHelper = OsmAndAidlHelper(this.application, this)'
+          assert s.count(needle)==1
+          s=s.replace(needle,needle+'\n        acceptTaskerRoute(intent)',1)
           p.write_text(s)
-          print('25-marker Kotlin patch applied')
+          manifest=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/AndroidManifest.xml')
+          m=manifest.read_text()
+          needle='<activity\n\t\t\tandroid:name="main.java.net.osmand.osmandapidemo.MainActivity"\n\t\t\tandroid:exported="true"'
+          assert needle in m
+          m=m.replace(needle,needle+'\n            android:launchMode="singleTop"',1)
+          needle='<intent-filter>\n\t\t\t\t<action android:name="android.intent.action.MAIN" />'
+          assert needle in m
+          m=m.replace(needle,'<intent-filter>\n                <action android:name="net.osmand.osmandapidemo.SHOW_ROUTE" />\n                <category android:name="android.intent.category.DEFAULT" />\n            </intent-filter>\n\n            '+needle,1)
+          manifest.write_text(m)
+          # FileProvider must expose the persistent files directory.
+          fp=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/res/xml/filepaths.xml')
+          f=fp.read_text()
+          assert '</paths>' in f
+          f=f.replace('</paths>','    <files-path name="route_files" path="." />\n</paths>')
+          fp.write_text(f)
+          print('Tasker intent route patch applied')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
