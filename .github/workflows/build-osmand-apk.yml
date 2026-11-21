@@ -1,0 +1,46 @@
+
+name: Build OsmAnd API Demo APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Extract OsmAnd source
+        run: |
+          mkdir -p source
+          unzip -q osmand-api-demo-master.zip -d source
+          find source -name gradlew -type f
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        run: |
+          GRADLEW=$(find source -name gradlew -type f | head -n 1)
+          test -n "$GRADLEW"
+          cd "$(dirname "$GRADLEW")"
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: osmand-api-demo-debug
+          path: source/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
