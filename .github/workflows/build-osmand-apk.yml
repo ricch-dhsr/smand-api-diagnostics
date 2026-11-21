@@ -1,4 +1,3 @@
-
 name: Build OsmAnd API Demo APK
 
 on:
@@ -10,38 +9,43 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-
       - name: Extract OsmAnd source
         run: |
           mkdir -p source
           unzip -q .github/workflows/osmand-api-demo-diagnostics-v1.zip -d source
-          find source -name gradlew -type f
-
-
+      - name: Test numbered map marker
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/MainActivity.kt')
+          s = p.read_text()
+          start = s.index('ApiActionType.AIDL_ADD_MAP_POINT -> {')
+          end = s.index('ApiActionType.AIDL_UPDATE_MAP_POINT -> {', start)
+          section = s[start:end]
+          assert 'location.name.substring(0, 1)' in section
+          assert 'Color.GREEN' in section
+          section = section.replace('location.name.substring(0, 1)', '"1"', 1)
+          section = section.replace('Color.GREEN', 'Color.BLUE', 1)
+          p.write_text(s[:start] + section + s[end:])
+          print('Marker test applied: label=1, color=BLUE')
+          PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: ''
-
-
       - name: Build debug APK
         run: |
           cd source/osmand-api-demo-master/OsmAnd-api-sample
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug
-
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
