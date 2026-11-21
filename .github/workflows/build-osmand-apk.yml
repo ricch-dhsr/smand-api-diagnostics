@@ -18,7 +18,7 @@ jobs:
       - name: Extract OsmAnd source
         run: |
           mkdir -p source
-          unzip -q osmand-api-demo-master.zip -d source
+                    unzip -q .github/workflows/osmand-api-demo-diagnostics-v1.zip -d source
           find source -name gradlew -type f
 
       - name: Set up Java
