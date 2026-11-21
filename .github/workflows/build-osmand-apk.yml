@@ -1,22 +1,19 @@
 name: Build OsmAnd API Demo APK
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-      - name: Extract OsmAnd source
+      - name: Extract working OsmAnd source
         run: |
           mkdir -p source
           unzip -q .github/workflows/osmand-api-demo-diagnostics-v1.zip -d source
-      - name: Test numbered map marker
+      - name: Add numbered image marker test
         run: |
           python3 - <<'PYCODE'
           from pathlib import Path
@@ -25,12 +22,39 @@ jobs:
           start = s.index('ApiActionType.AIDL_ADD_MAP_POINT -> {')
           end = s.index('ApiActionType.AIDL_UPDATE_MAP_POINT -> {', start)
           section = s[start:end]
-          assert 'location.name.substring(0, 1)' in section
-          assert 'Color.GREEN' in section
+          assert 'aidlHelper.addMapPoint(' in section
+          assert 'mapOf(AMapPoint.POINT_SPEED_PARAM to "4.0", AMapPoint.POINT_TYPE_ICON_NAME_PARAM to "ic_type_address")' in section
+          # Generate the PNG locally, share it with OsmAnd via the demo's existing FileProvider.
+          setup = '''
+                        val iconFile = java.io.File(cacheDir, "icons/numbered-stop-1.png")
+                        iconFile.parentFile?.mkdirs()
+                        val iconBitmap = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
+                        val iconCanvas = android.graphics.Canvas(iconBitmap)
+                        val circlePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                        circlePaint.color = android.graphics.Color.rgb(25, 118, 210)
+                        iconCanvas.drawCircle(128f, 128f, 122f, circlePaint)
+                        val numberPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                        numberPaint.color = android.graphics.Color.WHITE
+                        numberPaint.textAlign = android.graphics.Paint.Align.CENTER
+                        numberPaint.typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+                        numberPaint.textSize = 174f
+                        val numberBaseline = 128f - (numberPaint.ascent() + numberPaint.descent()) / 2f
+                        iconCanvas.drawText("1", 128f, numberBaseline, numberPaint)
+                        java.io.FileOutputStream(iconFile).use { stream ->
+                            iconBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+                        }
+                        iconBitmap.recycle()
+                        val iconUri = androidx.core.content.FileProvider.getUriForFile(
+                            this, "net.osmand.osmandapidemo.fileprovider", iconFile)
+                        grantUriPermission("net.osmand.plus", iconUri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        grantUriPermission("net.osmand", iconUri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          '''
+          section = section.replace('ApiActionType.AIDL_ADD_MAP_POINT -> {', 'ApiActionType.AIDL_ADD_MAP_POINT -> {' + setup, 1)
           section = section.replace('location.name.substring(0, 1)', '"1"', 1)
           section = section.replace('Color.GREEN', 'Color.BLUE', 1)
+          section = section.replace('mapOf(AMapPoint.POINT_SPEED_PARAM to "4.0", AMapPoint.POINT_TYPE_ICON_NAME_PARAM to "ic_type_address")', 'mapOf(AMapPoint.POINT_SPEED_PARAM to "4.0", AMapPoint.POINT_TYPE_ICON_NAME_PARAM to "ic_type_address", AMapPoint.POINT_IMAGE_URI_PARAM to iconUri.toString())', 1)
           p.write_text(s[:start] + section + s[end:])
-          print('Marker test applied: label=1, color=BLUE')
+          print('Image marker test applied: blue circle with white 1 via existing FileProvider')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
