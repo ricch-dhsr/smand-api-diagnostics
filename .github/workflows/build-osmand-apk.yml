@@ -34,13 +34,13 @@ jobs:
         with:
           packages: ''
 
+
       - name: Build debug APK
         run: |
-          GRADLEW=$(find source -name gradlew -type f | head -n 1)
-          test -n "$GRADLEW"
-          cd "$(dirname "$GRADLEW")"
+          cd source/osmand-api-demo-master/OsmAnd-api-sample
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug
+
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
