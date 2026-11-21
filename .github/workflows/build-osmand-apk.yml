@@ -27,7 +27,7 @@ jobs:
               private val taskerRouteAction = "net.osmand.osmandapidemo.SHOW_ROUTE"
               private val taskerRouteLayer = "tasker_route_am"
               private var routeRequestId = 0
-          
+ 
               private fun acceptTaskerRoute(incoming: Intent?) {
                   if (incoming?.action != taskerRouteAction) return
                   val raw = incoming.getStringExtra("route_json")
@@ -55,7 +55,7 @@ jobs:
                   val request = ++routeRequestId
                   applyTaskerRouteWhenReady(route, stops, request, 0)
               }
-          
+ 
               private fun applyTaskerRouteWhenReady(route: org.json.JSONObject, stops: org.json.JSONArray,
                                                     request: Int, attempt: Int) {
                   if (request != routeRequestId || isFinishing || isDestroyed) return
@@ -127,24 +127,29 @@ jobs:
                   } catch (e: Exception) {
                       android.util.Log.e("TaskerRoute", "GPX overview import failed", e)
                   }
-                  val first = stops.getJSONObject(0)
-                  aidl.setMapLocation(first.getDouble("lat"), first.getDouble("lon"), 12, 0f, true)
-                  aidl.refreshMap()
                   Toast.makeText(this, "AM route: $successful/${stops.length()} markers", Toast.LENGTH_LONG).show()
                   val osmandIntent = packageManager.getLaunchIntentForPackage("net.osmand.plus")
                       ?: packageManager.getLaunchIntentForPackage("net.osmand")
                   if (osmandIntent != null) {
                       osmandIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                       startActivity(osmandIntent)
+                      // Delay map positioning until OsmAnd has had time to resume its map activity.
+                      android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                          if (request == routeRequestId && !isDestroyed) {
+                              val first = stops.getJSONObject(0)
+                              mAidlHelper?.setMapLocation(first.getDouble("lat"), first.getDouble("lon"), 12, 0f, true)
+                              mAidlHelper?.refreshMap()
+                          }
+                      }, 1200L)
                   } else Toast.makeText(this, "Open OsmAnd manually", Toast.LENGTH_LONG).show()
               }
-          
+ 
               override fun onNewIntent(intent: Intent) {
                   super.onNewIntent(intent)
                   setIntent(intent)
                   acceptTaskerRoute(intent)
               }
-          
+ 
           '''
           s=s.replace(needle,feature+needle,1)
           needle='        mAidlHelper = OsmAndAidlHelper(this.application, this)'
@@ -160,13 +165,12 @@ jobs:
           assert needle in m
           m=m.replace(needle,'<intent-filter>\n                <action android:name="net.osmand.osmandapidemo.SHOW_ROUTE" />\n                <category android:name="android.intent.category.DEFAULT" />\n            </intent-filter>\n\n            '+needle,1)
           manifest.write_text(m)
-          # FileProvider must expose the persistent files directory.
           fp=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/res/xml/filepaths.xml')
           f=fp.read_text()
           assert '</paths>' in f
           f=f.replace('</paths>','    <files-path name="route_files" path="." />\n</paths>')
           fp.write_text(f)
-          print('Tasker intent route patch applied')
+          print('Tasker intent route patch with delayed map position applied')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
