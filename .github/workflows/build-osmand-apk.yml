@@ -13,20 +13,87 @@ jobs:
         run: |
           mkdir -p source
           unzip -q .github/workflows/osmand-api-demo-diagnostics-v1.zip -d source
-      - name: Add Tasker route intent and GPX overview
+      - name: Add Tasker route intent with HERE road geometry
         run: |
           python3 - <<'PYCODE'
           from pathlib import Path
           p=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/MainActivity.kt')
           s=p.read_text()
-          # Keep the proven original demo marker buttons and append an independent intent route flow.
           needle='    override fun onCreate(savedInstanceState: Bundle?) {'
           assert s.count(needle)==1
           feature=r'''
-              // Experimental one-route Tasker integration. Not a road-calculated route.
+              // Build 11: optional HERE road-following geometry; preserve Build 10 markers.
               private val taskerRouteAction = "net.osmand.osmandapidemo.SHOW_ROUTE"
               private val taskerRouteLayer = "tasker_route_am"
               private var routeRequestId = 0
+ 
+              // HERE flexible polyline decoder (2D coordinates, skips optional 3rd dimension).
+              private fun decodeHerePolyline(encoded: String): List<Pair<Double, Double>> {
+                  val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                  var pos = 0
+                  fun unsigned(): Long {
+                      var value = 0L
+                      var shift = 0
+                      while (true) {
+                          require(pos < encoded.length && shift <= 60) { "Malformed HERE polyline" }
+                          val digit = alphabet.indexOf(encoded[pos++])
+                          require(digit >= 0) { "Invalid HERE polyline character" }
+                          value = value or ((digit.toLong() and 31L) shl shift)
+                          if ((digit and 32) == 0) return value
+                          shift += 5
+                      }
+                  }
+                  fun signed(): Long {
+                      val n = unsigned()
+                      return if ((n and 1L) == 0L) n shr 1 else -(n shr 1) - 1L
+                  }
+                  val version = unsigned()
+                  require(version == 1L) { "Unsupported HERE polyline version" }
+                  val header = unsigned().toInt()
+                  val precision = header and 15
+                  val thirdDim = (header shr 4) and 7
+                  val thirdPrecision = (header shr 7) and 15
+                  require(precision in 0..15 && thirdPrecision in 0..15) { "Bad precision" }
+                  val factor = Math.pow(10.0, precision.toDouble())
+                  var lat = 0L
+                  var lon = 0L
+                  val result = ArrayList<Pair<Double, Double>>()
+                  while (pos < encoded.length) {
+                      lat += signed()
+                      lon += signed()
+                      if (thirdDim != 0) signed() // consume elevation or other third dimension
+                      val latitude = lat / factor
+                      val longitude = lon / factor
+                      require(latitude in -90.0..90.0 && longitude in -180.0..180.0) { "Bad decoded coordinate" }
+                      result.add(Pair(latitude, longitude))
+                      require(result.size <= 100000) { "Route too large" }
+                  }
+                  require(result.size >= 2) { "HERE polyline has too few points" }
+                  return result
+              }
+ 
+              private fun hereRoadPoints(hereJson: String?, expectedLegs: Int): List<Pair<Double, Double>>? {
+                  if (hereJson.isNullOrBlank() || expectedLegs < 1) return null
+                  try {
+                      val root = org.json.JSONObject(hereJson)
+                      val routes = root.getJSONArray("routes")
+                      require(routes.length() > 0) { "No HERE routes" }
+                      val sections = routes.getJSONObject(0).getJSONArray("sections")
+                      require(sections.length() == expectedLegs) { "Expected $expectedLegs HERE legs; got ${sections.length()}" }
+                      val combined = ArrayList<Pair<Double, Double>>()
+                      for (i in 0 until sections.length()) {
+                          val points = decodeHerePolyline(sections.getJSONObject(i).getString("polyline"))
+                          for (point in points) {
+                              if (combined.isEmpty() || combined.last() != point) combined.add(point)
+                          }
+                      }
+                      require(combined.size >= 2) { "Insufficient road geometry" }
+                      return combined
+                  } catch (e: Exception) {
+                      android.util.Log.w("TaskerRoute", "HERE geometry rejected; using straight-line fallback", e)
+                      return null
+                  }
+              }
  
               private fun acceptTaskerRoute(incoming: Intent?) {
                   if (incoming?.action != taskerRouteAction) return
@@ -52,23 +119,22 @@ jobs:
                       Toast.makeText(this, "Invalid route JSON: ${e.message}", Toast.LENGTH_LONG).show()
                       return
                   }
+                  val hereJson = incoming.getStringExtra("here_json")
                   val request = ++routeRequestId
-                  applyTaskerRouteWhenReady(route, stops, request, 0)
+                  applyTaskerRouteWhenReady(route, stops, hereJson, request, 0)
               }
  
               private fun applyTaskerRouteWhenReady(route: org.json.JSONObject, stops: org.json.JSONArray,
-                                                    request: Int, attempt: Int) {
+                                                    hereJson: String?, request: Int, attempt: Int) {
                   if (request != routeRequestId || isFinishing || isDestroyed) return
                   val aidl = mAidlHelper
                   if (aidl == null || !(aidl.addMapLayer(taskerRouteLayer, "AM Delivery Route", 5.5f, null, true) ||
                           aidl.updateMapLayer(taskerRouteLayer, "AM Delivery Route", 5.5f, null, true))) {
                       if (attempt < 30) {
                           android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                              applyTaskerRouteWhenReady(route, stops, request, attempt + 1)
+                              applyTaskerRouteWhenReady(route, stops, hereJson, request, attempt + 1)
                           }, 500)
-                      } else {
-                          Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
-                      }
+                      } else Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
                       return
                   }
                   val previousCount = getPreferences(MODE_PRIVATE).getInt("am_stop_count", 0)
@@ -105,16 +171,22 @@ jobs:
                               mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))) successful++
                   }
                   getPreferences(MODE_PRIVATE).edit().putInt("am_stop_count", stops.length()).apply()
-                  // GPX track is a straight-line overview, NOT road-following geometry.
-                  // It is deliberately separate from OsmAnd turn-by-turn navigation.
+                  var roadFollow = false
                   try {
+                      val road = hereRoadPoints(hereJson, stops.length() - 1)
+                      roadFollow = road != null
                       val gpx = java.io.File(filesDir, "tasker_am_overview.gpx")
                       val xml = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
                           "<gpx version=\"1.1\" creator=\"Tasker Route Demo\" xmlns=\"http://www.topografix.com/GPX/1/1\"><trk><name>AM Overview</name><trkseg>")
-                      for (i in 0 until stops.length()) {
-                          val stop = stops.getJSONObject(i)
-                          xml.append("<trkpt lat=\"").append(stop.getDouble("lat"))
-                              .append("\" lon=\"").append(stop.getDouble("lon")).append("\"/>")
+                      if (road != null) {
+                          for (point in road) xml.append("<trkpt lat=\"").append(point.first)
+                              .append("\" lon=\"").append(point.second).append("\"/>")
+                      } else {
+                          for (i in 0 until stops.length()) {
+                              val stop = stops.getJSONObject(i)
+                              xml.append("<trkpt lat=\"").append(stop.getDouble("lat"))
+                                  .append("\" lon=\"").append(stop.getDouble("lon")).append("\"/>")
+                          }
                       }
                       xml.append("</trkseg></trk></gpx>")
                       gpx.writeText(xml.toString())
@@ -127,17 +199,17 @@ jobs:
                   } catch (e: Exception) {
                       android.util.Log.e("TaskerRoute", "GPX overview import failed", e)
                   }
-                  Toast.makeText(this, "AM route: $successful/${stops.length()} markers", Toast.LENGTH_LONG).show()
+                  val mode = if (roadFollow) "HERE roads" else "straight-line fallback"
+                  Toast.makeText(this, "AM route: $successful/${stops.length()} markers; $mode", Toast.LENGTH_LONG).show()
                   val osmandIntent = packageManager.getLaunchIntentForPackage("net.osmand.plus")
                       ?: packageManager.getLaunchIntentForPackage("net.osmand")
                   if (osmandIntent != null) {
                       osmandIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                       startActivity(osmandIntent)
-                      // Delay map positioning until OsmAnd has had time to resume its map activity.
                       android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                           if (request == routeRequestId && !isDestroyed) {
                               val first = stops.getJSONObject(0)
-                              mAidlHelper?.setMapLocation(first.getDouble("lat"), first.getDouble("lon"), 12, 0f, true)
+                              mAidlHelper?.setMapLocation(first.getDouble("lat"), first.getDouble("lon"), 14, 0f, true)
                               mAidlHelper?.refreshMap()
                           }
                       }, 1200L)
@@ -170,7 +242,7 @@ jobs:
           assert '</paths>' in f
           f=f.replace('</paths>','    <files-path name="route_files" path="." />\n</paths>')
           fp.write_text(f)
-          print('Tasker intent route patch with delayed map position applied')
+          print('Build 11 HERE flexible-polyline route patch applied')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
