@@ -39,6 +39,21 @@ jobs:
                   "EX" -> "green"
                   else -> "blue"
               }
+              // Build 12.3: append-only diagnostic log in app-specific external files.
+              private fun routeDiag(event: String) {
+                  val line = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+                      .format(java.util.Date()) + " pid=" + android.os.Process.myPid() +
+                      " activity=" + System.identityHashCode(this) + " " + event
+                  android.util.Log.i("TaskerRouteDiag", line)
+                  try {
+                      val dir = getExternalFilesDir(null) ?: filesDir
+                      synchronized(this) {
+                          java.io.File(dir, "route_debug.log").appendText(line + "\n")
+                      }
+                  } catch (e: Exception) {
+                      android.util.Log.e("TaskerRouteDiag", "File logging failed", e)
+                  }
+              }
               private fun routePrefs() = getSharedPreferences("tasker_route_slots", MODE_PRIVATE)
               private fun gpxColor(slot: String): String = routePrefs().getString("line_color_" + slot,
                   defaultGpxColor(slot)) ?: defaultGpxColor(slot)
@@ -78,7 +93,11 @@ jobs:
  
               private fun setSlotVisibility(slot: String, visible: Boolean): Boolean {
                   val aidl = mAidlHelper ?: return false
-                  val raw = routePrefs().getString("json_" + slot, null) ?: return false
+                  val raw = routePrefs().getString("json_" + slot, null)
+                  routeDiag("visibility slot=" + slot + " requested=" + visible +
+                      " savedJson=" + (raw != null) + " layer=" + layerId(slot) +
+                      " gpx=" + gpxName(slot))
+                  if (raw == null) return false
                   val layer = layerId(slot)
                   if (visible) {
                       val stops = org.json.JSONObject(raw).getJSONArray("stops")
@@ -110,10 +129,17 @@ jobs:
                       }
                       if (!aidl.showGpx(gpxName(slot))) return false
                   } else {
+                      routeDiag("hide " + slot + " removeMapLayer BEGIN")
                       val layerRemoved = aidl.removeMapLayer(layer)
+                      routeDiag("hide " + slot + " removeMapLayer RESULT=" + layerRemoved)
+                      routeDiag("hide " + slot + " hideGpx BEGIN")
                       val trackHidden = aidl.hideGpx(gpxName(slot))
+                      routeDiag("hide " + slot + " hideGpx RESULT=" + trackHidden)
+                      android.util.Log.i("TaskerRoute", "hide " + slot + " layerRemoved=" + layerRemoved + " trackHidden=" + trackHidden)
+                      Toast.makeText(this, "hide " + slot + ": markers=" + layerRemoved + " GPX=" + trackHidden, Toast.LENGTH_LONG).show()
                       if (!layerRemoved || !trackHidden) return false
                   }
+                  routeDiag("visibility " + slot + " SUCCESS=" + visible)
                   routePrefs().edit().putBoolean("visible_" + slot, visible).apply()
                   aidl.refreshMap()
                   return true
@@ -121,6 +147,7 @@ jobs:
  
               private fun clearSlot(slot: String): Boolean {
                   val aidl = mAidlHelper ?: return false
+                  routeDiag("clear slot=" + slot + " saved=" + routePrefs().contains("json_" + slot))
                   aidl.removeMapLayer(layerId(slot))
                   aidl.removeGpx(gpxName(slot))
                   routePrefs().edit().remove("json_" + slot)
@@ -132,19 +159,32 @@ jobs:
               private fun returnToOsmandMap() {
                   val osmandIntent = packageManager.getLaunchIntentForPackage("net.osmand.plus")
                       ?: packageManager.getLaunchIntentForPackage("net.osmand")
+                  routeDiag("returnToMap launchIntentFound=" + (osmandIntent != null))
                   if (osmandIntent != null) {
                       osmandIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                       startActivity(osmandIntent)
+                      routeDiag("returnToMap startActivity issued")
                   }
               }
  
               private var commandGeneration = 0
-              private fun handleRouteCommand(command: String, attempt: Int = 0, generation: Int = commandGeneration) {
-                  if (generation != commandGeneration || isFinishing || isDestroyed) return
+              private var pendingRouteCommand: String? = null
+              private fun onTaskerOsmandConnected() {
+                  routeDiag("service callback interfaceReady=" +
+                      (mAidlHelper?.isTaskerServiceConnected() == true) +
+                      " pending=" + pendingRouteCommand)
+                  val command = pendingRouteCommand ?: return
+                  pendingRouteCommand = null
+                  handleRouteCommand(command)
+              }
+              private fun handleRouteCommand(command: String) {
+                  routeDiag("command received=" + command + " finishing=" + isFinishing +
+                      " destroyed=" + isDestroyed + " interfaceReady=" +
+                      (mAidlHelper?.isTaskerServiceConnected() == true))
+                  if (isFinishing || isDestroyed) return
                   if (mAidlHelper?.isTaskerServiceConnected() != true) {
-                      if (attempt < 30) android.os.Handler(android.os.Looper.getMainLooper())
-                          .postDelayed({ handleRouteCommand(command, attempt + 1, generation) }, 500)
-                      else Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
+                      pendingRouteCommand = command
+                      routeDiag("command queued=" + command)
                       return
                   }
                   val operation = command.substringBefore("_")
@@ -164,13 +204,18 @@ jobs:
                               "hide" -> setSlotVisibility(slot, false)
                               else -> clearSlot(slot)
                           }
+                          routeDiag("command slot=" + slot + " operation=" + operation + " result=" + ok)
                           if (ok) changed++
                       }
+                      routeDiag("command completed=" + command + " changed=" + changed)
                       Toast.makeText(this, command + ": " + changed + " slot(s)", Toast.LENGTH_SHORT).show()
-                      if (changed > 0) returnToOsmandMap()
                   } catch (e: Exception) {
+                      routeDiag("command exception=" + command + " type=" + e.javaClass.name + " message=" + e.message)
                       android.util.Log.e("TaskerRoute", "Command failed: " + command, e)
                       Toast.makeText(this, "Route command failed: " + e.message, Toast.LENGTH_LONG).show()
+                  } finally {
+                      // Return to the map even if an individual API operation fails.
+                      returnToOsmandMap()
                   }
               }
  
@@ -243,11 +288,15 @@ jobs:
               }
  
               private fun acceptTaskerRoute(incoming: Intent?) {
+                  routeDiag("intent action=" + incoming?.action + " hasCommand=" +
+                      (incoming?.hasExtra("command") == true) + " hasRoute=" +
+                      (incoming?.hasExtra("route_json") == true) + " hasHERE=" +
+                      (incoming?.hasExtra("here_json") == true))
                   if (incoming?.action != taskerRouteAction) return
                   val command = incoming.getStringExtra("command")?.trim()?.lowercase(java.util.Locale.US)
                   if (!command.isNullOrEmpty()) {
                       commandGeneration++
-                      handleRouteCommand(command, 0, commandGeneration)
+                      handleRouteCommand(command)
                       return
                   }
                   val raw = incoming.getStringExtra("route_json")
@@ -293,6 +342,8 @@ jobs:
                   settings.apply()
                   val hereJson = incoming.getStringExtra("here_json")
                   val request = ++routeRequestId
+                  routeDiag("route accepted slot=" + slot + " stops=" + stops.length() +
+                      " herePresent=" + !hereJson.isNullOrBlank())
                   applyTaskerRouteWhenReady(route, stops, hereJson, request, 0, slot)
               }
  
@@ -310,6 +361,7 @@ jobs:
                       } else Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
                       return
                   }
+                  routeDiag("route install AIDL ready slot=" + slot + " attempt=" + attempt)
                   val previousCount = routePrefs().getInt("count_" + slot, 0)
                   for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "${slotKey(slot)}_stop_$n")
                   val blue = markerFill(slot)
@@ -361,6 +413,9 @@ jobs:
                   }
                   routePrefs().edit().putString("json_" + slot, route.toString())
                       .putBoolean("visible_" + slot, true).apply()
+                  routeDiag("route installed slot=" + slot + " markers=" + successful +
+                      "/" + stops.length() + " roadFollow=" + roadFollow +
+                      " saved=" + routePrefs().contains("json_" + slot))
                   val mode = if (roadFollow) "HERE roads" else "straight-line fallback"
                   Toast.makeText(this, "$slot route: $successful/${stops.length()} markers; $mode", Toast.LENGTH_LONG).show()
                   val osmandIntent = packageManager.getLaunchIntentForPackage("net.osmand.plus")
@@ -380,6 +435,7 @@ jobs:
  
               override fun onNewIntent(intent: Intent) {
                   super.onNewIntent(intent)
+                  routeDiag("onNewIntent")
                   setIntent(intent)
                   acceptTaskerRoute(intent)
               }
@@ -388,13 +444,19 @@ jobs:
           s=s.replace(needle,feature+needle,1)
           needle='        mAidlHelper = OsmAndAidlHelper(this.application, this)'
           assert s.count(needle)==1
-          s=s.replace(needle,needle+'\n        acceptTaskerRoute(intent)',1)
+          s=s.replace(needle,needle+'\n        routeDiag("onCreate after AIDL helper construction");\n        mAidlHelper.setTaskerConnectedCallback(object : Runnable { override fun run() { onTaskerOsmandConnected() } });\n        acceptTaskerRoute(intent)',1)
           p.write_text(s)
           helper=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/OsmAndAidlHelper.java')
           h=helper.read_text()
           needle='\tpublic boolean refreshMap() {'
           assert h.count(needle)==1
-          h=h.replace(needle, '\tpublic boolean isTaskerServiceConnected() { return mIOsmAndAidlInterface != null; }\n\n'+needle,1)
+          h=h.replace(needle, '\tprivate Runnable taskerConnectedCallback;\n\tpublic void setTaskerConnectedCallback(Runnable callback) {\n\t\ttaskerConnectedCallback = callback;\n\t\tif (callback != null && mIOsmAndAidlInterface != null) callback.run();\n\t}\n\tpublic boolean isTaskerServiceConnected() { return mIOsmAndAidlInterface != null; }\n\n'+needle,1)
+          needle='mIOsmAndAidlInterface = IOsmAndAidlInterface.Stub.asInterface(service);'
+          assert h.count(needle)==1
+          h=h.replace(needle,needle+'\n\t\t\tif (taskerConnectedCallback != null) taskerConnectedCallback.run();',1)
+          # Java helper diagnostics: Logcat only, app activity writes the persistent log.
+          h=h.replace('mIOsmAndAidlInterface = IOsmAndAidlInterface.Stub.asInterface(service);',
+                      'android.util.Log.i("TaskerRouteDiag", "AIDL onServiceConnected binder=" + (service != null));\n\t\t\tmIOsmAndAidlInterface = IOsmAndAidlInterface.Stub.asInterface(service);',1)
           helper.write_text(h)
           manifest=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/AndroidManifest.xml')
           m=manifest.read_text()
@@ -410,7 +472,7 @@ jobs:
           assert '</paths>' in f
           f=f.replace('</paths>','    <files-path name="route_files" path="." />\n</paths>')
           fp.write_text(f)
-          print('Build 12.1 multi-slot HERE route patch applied')
+          print('Build 12.3 persistent diagnostic logging patch applied')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
