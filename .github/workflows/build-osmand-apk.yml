@@ -22,7 +22,7 @@ jobs:
           needle='    override fun onCreate(savedInstanceState: Bundle?) {'
           assert s.count(needle)==1
           feature=r'''
-              // Build 12: independent AM/PM/EX route slots; retain HERE geometry and numbered markers.
+              // Build 12.1: independent AM/PM/EX route slots; retain HERE geometry and numbered markers.
               private val taskerRouteAction = "net.osmand.osmandapidemo.SHOW_ROUTE"
               private var routeRequestId = 0
  
@@ -34,12 +34,47 @@ jobs:
                   "EX" -> android.graphics.Color.rgb(46, 160, 85)
                   else -> android.graphics.Color.rgb(25, 118, 210)
               }
-              private fun gpxColor(slot: String): String = when (slot) {
+              private fun defaultGpxColor(slot: String): String = when (slot) {
                   "PM" -> "orange"
                   "EX" -> "green"
                   else -> "blue"
               }
               private fun routePrefs() = getSharedPreferences("tasker_route_slots", MODE_PRIVATE)
+              private fun gpxColor(slot: String): String = routePrefs().getString("line_color_" + slot,
+                  defaultGpxColor(slot)) ?: defaultGpxColor(slot)
+              private fun parseMarkerColor(value: String?, fallback: Int): Int {
+                  if (value.isNullOrBlank()) return fallback
+                  return try { android.graphics.Color.parseColor(value) } catch (_: Exception) { fallback }
+              }
+              private fun markerFill(slot: String): Int = routePrefs().getInt("marker_fill_" + slot, routeColor(slot))
+              private fun markerBorder(slot: String): Int = routePrefs().getInt("marker_border_" + slot, android.graphics.Color.RED)
+              private fun markerBorderWidth(slot: String): Float = routePrefs().getFloat("marker_border_width_" + slot, 3f)
+              private fun markerRadius(slot: String): Float = routePrefs().getFloat("marker_radius_" + slot, 112f)
+              private fun drawRouteMarker(slot: String, n: Int, iconFile: java.io.File) {
+                  iconFile.parentFile?.mkdirs()
+                  val bitmap = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
+                  val canvas = android.graphics.Canvas(bitmap)
+                  val circle = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                  circle.color = markerFill(slot)
+                  val radius = markerRadius(slot)
+                  canvas.drawCircle(128f, 128f, radius, circle)
+                  val stroke = markerBorderWidth(slot)
+                  if (stroke > 0f) {
+                      circle.color = markerBorder(slot)
+                      circle.style = android.graphics.Paint.Style.STROKE
+                      circle.strokeWidth = stroke
+                      canvas.drawCircle(128f, 128f, radius - stroke / 2f, circle)
+                  }
+                  val number = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                  number.color = android.graphics.Color.WHITE
+                  number.textAlign = android.graphics.Paint.Align.CENTER
+                  number.typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+                  number.textSize = if (n < 10) 160f else 128f
+                  canvas.drawText(n.toString(), 128f, 128f - (number.ascent() + number.descent()) / 2f, number)
+                  java.io.FileOutputStream(iconFile).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                  bitmap.recycle()
+              }
+ 
  
               private fun setSlotVisibility(slot: String, visible: Boolean): Boolean {
                   val aidl = mAidlHelper ?: return false
@@ -53,13 +88,13 @@ jobs:
                           val n = i + 1
                           val stop = stops.getJSONObject(i)
                           val iconFile = java.io.File(filesDir, "route_icons/" + slotKey(slot) + "_stop_" + n + ".png")
-                          if (!iconFile.exists()) continue
+                          drawRouteMarker(slot, n, iconFile)
                           val uri = androidx.core.content.FileProvider.getUriForFile(
                               this, "net.osmand.osmandapidemo.fileprovider", iconFile)
                           grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                           grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                           aidl.addMapPoint(layer, slotKey(slot) + "_stop_" + n, "",
-                              stop.getString("address"), slot + " Stop " + n, routeColor(slot),
+                              stop.getString("address"), slot + " Stop " + n, markerFill(slot),
                               ALatLon(stop.getDouble("lat"), stop.getDouble("lon")),
                               listOf("Stop " + n, stop.getString("address")),
                               mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))
@@ -73,10 +108,11 @@ jobs:
                           grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                           aidl.importGpxFromUri(uri, gpxName(slot), gpxColor(slot), true)
                       }
-                      aidl.showGpx(gpxName(slot))
+                      if (!aidl.showGpx(gpxName(slot))) return false
                   } else {
-                      aidl.removeMapLayer(layer)
-                      aidl.hideGpx(gpxName(slot))
+                      val layerRemoved = aidl.removeMapLayer(layer)
+                      val trackHidden = aidl.hideGpx(gpxName(slot))
+                      if (!layerRemoved || !trackHidden) return false
                   }
                   routePrefs().edit().putBoolean("visible_" + slot, visible).apply()
                   aidl.refreshMap()
@@ -93,10 +129,21 @@ jobs:
                   return true
               }
  
-              private fun handleRouteCommand(command: String, attempt: Int = 0) {
-                  if (mAidlHelper == null) {
+              private fun returnToOsmandMap() {
+                  val osmandIntent = packageManager.getLaunchIntentForPackage("net.osmand.plus")
+                      ?: packageManager.getLaunchIntentForPackage("net.osmand")
+                  if (osmandIntent != null) {
+                      osmandIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                      startActivity(osmandIntent)
+                  }
+              }
+ 
+              private var commandGeneration = 0
+              private fun handleRouteCommand(command: String, attempt: Int = 0, generation: Int = commandGeneration) {
+                  if (generation != commandGeneration || isFinishing || isDestroyed) return
+                  if (mAidlHelper?.isTaskerServiceConnected() != true) {
                       if (attempt < 30) android.os.Handler(android.os.Looper.getMainLooper())
-                          .postDelayed({ handleRouteCommand(command, attempt + 1) }, 500)
+                          .postDelayed({ handleRouteCommand(command, attempt + 1, generation) }, 500)
                       else Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
                       return
                   }
@@ -120,6 +167,7 @@ jobs:
                           if (ok) changed++
                       }
                       Toast.makeText(this, command + ": " + changed + " slot(s)", Toast.LENGTH_SHORT).show()
+                      if (changed > 0) returnToOsmandMap()
                   } catch (e: Exception) {
                       android.util.Log.e("TaskerRoute", "Command failed: " + command, e)
                       Toast.makeText(this, "Route command failed: " + e.message, Toast.LENGTH_LONG).show()
@@ -198,7 +246,8 @@ jobs:
                   if (incoming?.action != taskerRouteAction) return
                   val command = incoming.getStringExtra("command")?.trim()?.lowercase(java.util.Locale.US)
                   if (!command.isNullOrEmpty()) {
-                      handleRouteCommand(command)
+                      commandGeneration++
+                      handleRouteCommand(command, 0, commandGeneration)
                       return
                   }
                   val raw = incoming.getStringExtra("route_json")
@@ -226,6 +275,22 @@ jobs:
                       Toast.makeText(this, "Invalid route JSON: ${e.message}", Toast.LENGTH_LONG).show()
                       return
                   }
+                  // Optional appearance extras; saved separately for each route slot.
+                  val settings = routePrefs().edit()
+                  if (incoming.hasExtra("marker_color")) settings.putInt("marker_fill_" + slot,
+                      parseMarkerColor(incoming.getStringExtra("marker_color"), routeColor(slot)))
+                  if (incoming.hasExtra("marker_border_color")) settings.putInt("marker_border_" + slot,
+                      parseMarkerColor(incoming.getStringExtra("marker_border_color"), android.graphics.Color.RED))
+                  if (incoming.hasExtra("marker_border_width")) settings.putFloat("marker_border_width_" + slot,
+                      (incoming.getStringExtra("marker_border_width")?.toFloatOrNull() ?: 3f).coerceIn(0f, 20f))
+                  if (incoming.hasExtra("marker_radius")) settings.putFloat("marker_radius_" + slot,
+                      (incoming.getStringExtra("marker_radius")?.toFloatOrNull() ?: 112f).coerceIn(64f, 124f))
+                  if (incoming.hasExtra("route_color")) {
+                      val color = incoming.getStringExtra("route_color")?.lowercase(java.util.Locale.US) ?: ""
+                      if (color in listOf("red", "orange", "yellow", "lightgreen", "green", "lightblue", "blue", "purple", "pink", "brown"))
+                          settings.putString("line_color_" + slot, color)
+                  }
+                  settings.apply()
                   val hereJson = incoming.getStringExtra("here_json")
                   val request = ++routeRequestId
                   applyTaskerRouteWhenReady(route, stops, hereJson, request, 0, slot)
@@ -247,27 +312,14 @@ jobs:
                   }
                   val previousCount = routePrefs().getInt("count_" + slot, 0)
                   for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "${slotKey(slot)}_stop_$n")
-                  val blue = routeColor(slot)
+                  val blue = markerFill(slot)
                   var successful = 0
                   for (i in 0 until stops.length()) {
                       val n = i + 1
                       val stop = stops.getJSONObject(i)
                       val address = stop.getString("address")
                       val iconFile = java.io.File(filesDir, "route_icons/${slotKey(slot)}_stop_$n.png")
-                      iconFile.parentFile?.mkdirs()
-                      val bitmap = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
-                      val canvas = android.graphics.Canvas(bitmap)
-                      val circle = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-                      circle.color = blue
-                      canvas.drawCircle(128f, 128f, 122f, circle)
-                      val number = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-                      number.color = android.graphics.Color.WHITE
-                      number.textAlign = android.graphics.Paint.Align.CENTER
-                      number.typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
-                      number.textSize = if (n < 10) 174f else 138f
-                      canvas.drawText(n.toString(), 128f, 128f - (number.ascent() + number.descent()) / 2f, number)
-                      java.io.FileOutputStream(iconFile).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
-                      bitmap.recycle()
+                      drawRouteMarker(slot, n, iconFile)
                       val uri = androidx.core.content.FileProvider.getUriForFile(
                           this, "net.osmand.osmandapidemo.fileprovider", iconFile)
                       grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -338,6 +390,12 @@ jobs:
           assert s.count(needle)==1
           s=s.replace(needle,needle+'\n        acceptTaskerRoute(intent)',1)
           p.write_text(s)
+          helper=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/OsmAndAidlHelper.java')
+          h=helper.read_text()
+          needle='\tpublic boolean refreshMap() {'
+          assert h.count(needle)==1
+          h=h.replace(needle, '\tpublic boolean isTaskerServiceConnected() { return mIOsmAndAidlInterface != null; }\n\n'+needle,1)
+          helper.write_text(h)
           manifest=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/AndroidManifest.xml')
           m=manifest.read_text()
           needle='<activity\n\t\t\tandroid:name="main.java.net.osmand.osmandapidemo.MainActivity"\n\t\t\tandroid:exported="true"'
@@ -352,7 +410,7 @@ jobs:
           assert '</paths>' in f
           f=f.replace('</paths>','    <files-path name="route_files" path="." />\n</paths>')
           fp.write_text(f)
-          print('Build 12 multi-slot HERE route patch applied')
+          print('Build 12.1 multi-slot HERE route patch applied')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
