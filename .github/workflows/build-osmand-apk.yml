@@ -13,7 +13,7 @@ jobs:
         run: |
           mkdir -p source
           unzip -q .github/workflows/osmand-api-demo-diagnostics-v1.zip -d source
-      - name: Add Tasker route intent with HERE road geometry
+      - name: Build 12 Tasker AM PM EX routes and HERE road geometry
         run: |
           python3 - <<'PYCODE'
           from pathlib import Path
@@ -22,10 +22,109 @@ jobs:
           needle='    override fun onCreate(savedInstanceState: Bundle?) {'
           assert s.count(needle)==1
           feature=r'''
-              // Build 11: optional HERE road-following geometry; preserve Build 10 markers.
+              // Build 12: independent AM/PM/EX route slots; retain HERE geometry and numbered markers.
               private val taskerRouteAction = "net.osmand.osmandapidemo.SHOW_ROUTE"
-              private val taskerRouteLayer = "tasker_route_am"
               private var routeRequestId = 0
+ 
+              private fun slotKey(slot: String) = slot.lowercase(java.util.Locale.US)
+              private fun layerId(slot: String) = "tasker_route_" + slotKey(slot)
+              private fun gpxName(slot: String) = "tasker_" + slotKey(slot) + "_overview.gpx"
+              private fun routeColor(slot: String): Int = when (slot) {
+                  "PM" -> android.graphics.Color.rgb(230, 126, 34)
+                  "EX" -> android.graphics.Color.rgb(46, 160, 85)
+                  else -> android.graphics.Color.rgb(25, 118, 210)
+              }
+              private fun gpxColor(slot: String): String = when (slot) {
+                  "PM" -> "orange"
+                  "EX" -> "green"
+                  else -> "blue"
+              }
+              private fun routePrefs() = getSharedPreferences("tasker_route_slots", MODE_PRIVATE)
+ 
+              private fun setSlotVisibility(slot: String, visible: Boolean): Boolean {
+                  val aidl = mAidlHelper ?: return false
+                  val raw = routePrefs().getString("json_" + slot, null) ?: return false
+                  val layer = layerId(slot)
+                  if (visible) {
+                      val stops = org.json.JSONObject(raw).getJSONArray("stops")
+                      if (!(aidl.addMapLayer(layer, slot + " Delivery Route", 5.5f, null, true) ||
+                            aidl.updateMapLayer(layer, slot + " Delivery Route", 5.5f, null, true))) return false
+                      for (i in 0 until stops.length()) {
+                          val n = i + 1
+                          val stop = stops.getJSONObject(i)
+                          val iconFile = java.io.File(filesDir, "route_icons/" + slotKey(slot) + "_stop_" + n + ".png")
+                          if (!iconFile.exists()) continue
+                          val uri = androidx.core.content.FileProvider.getUriForFile(
+                              this, "net.osmand.osmandapidemo.fileprovider", iconFile)
+                          grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          aidl.addMapPoint(layer, slotKey(slot) + "_stop_" + n, "",
+                              stop.getString("address"), slot + " Stop " + n, routeColor(slot),
+                              ALatLon(stop.getDouble("lat"), stop.getDouble("lon")),
+                              listOf("Stop " + n, stop.getString("address")),
+                              mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))
+                      }
+                      // Re-import the saved GPX when necessary; it also makes the track visible.
+                      val gpx = java.io.File(filesDir, gpxName(slot))
+                      if (gpx.exists()) {
+                          val uri = androidx.core.content.FileProvider.getUriForFile(
+                              this, "net.osmand.osmandapidemo.fileprovider", gpx)
+                          grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          aidl.importGpxFromUri(uri, gpxName(slot), gpxColor(slot), true)
+                      }
+                      aidl.showGpx(gpxName(slot))
+                  } else {
+                      aidl.removeMapLayer(layer)
+                      aidl.hideGpx(gpxName(slot))
+                  }
+                  routePrefs().edit().putBoolean("visible_" + slot, visible).apply()
+                  aidl.refreshMap()
+                  return true
+              }
+ 
+              private fun clearSlot(slot: String): Boolean {
+                  val aidl = mAidlHelper ?: return false
+                  aidl.removeMapLayer(layerId(slot))
+                  aidl.removeGpx(gpxName(slot))
+                  routePrefs().edit().remove("json_" + slot)
+                      .remove("visible_" + slot).remove("count_" + slot).apply()
+                  aidl.refreshMap()
+                  return true
+              }
+ 
+              private fun handleRouteCommand(command: String, attempt: Int = 0) {
+                  if (mAidlHelper == null) {
+                      if (attempt < 30) android.os.Handler(android.os.Looper.getMainLooper())
+                          .postDelayed({ handleRouteCommand(command, attempt + 1) }, 500)
+                      else Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val operation = command.substringBefore("_")
+                  val suffix = command.substringAfter("_", "").uppercase(java.util.Locale.US)
+                  if (operation !in listOf("show", "hide", "clear") ||
+                      suffix !in listOf("AM", "PM", "EX", "ALL") ||
+                      (operation == "clear" && suffix == "ALL")) {
+                      Toast.makeText(this, "Unknown route command: " + command, Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val slots = if (suffix == "ALL") listOf("AM", "PM", "EX") else listOf(suffix)
+                  var changed = 0
+                  try {
+                      for (slot in slots) {
+                          val ok = when (operation) {
+                              "show" -> setSlotVisibility(slot, true)
+                              "hide" -> setSlotVisibility(slot, false)
+                              else -> clearSlot(slot)
+                          }
+                          if (ok) changed++
+                      }
+                      Toast.makeText(this, command + ": " + changed + " slot(s)", Toast.LENGTH_SHORT).show()
+                  } catch (e: Exception) {
+                      android.util.Log.e("TaskerRoute", "Command failed: " + command, e)
+                      Toast.makeText(this, "Route command failed: " + e.message, Toast.LENGTH_LONG).show()
+                  }
+              }
  
               // HERE flexible polyline decoder (2D coordinates, skips optional 3rd dimension).
               private fun decodeHerePolyline(encoded: String): List<Pair<Double, Double>> {
@@ -97,6 +196,11 @@ jobs:
  
               private fun acceptTaskerRoute(incoming: Intent?) {
                   if (incoming?.action != taskerRouteAction) return
+                  val command = incoming.getStringExtra("command")?.trim()?.lowercase(java.util.Locale.US)
+                  if (!command.isNullOrEmpty()) {
+                      handleRouteCommand(command)
+                      return
+                  }
                   val raw = incoming.getStringExtra("route_json")
                   if (raw.isNullOrBlank()) {
                       Toast.makeText(this, "Missing route_json", Toast.LENGTH_LONG).show()
@@ -104,8 +208,11 @@ jobs:
                   }
                   val route: org.json.JSONObject
                   val stops: org.json.JSONArray
+                  val slot: String
                   try {
                       route = org.json.JSONObject(raw)
+                      slot = route.optString("route", "AM").uppercase(java.util.Locale.US)
+                      require(slot in listOf("AM", "PM", "EX")) { "Invalid route slot" }
                       stops = route.getJSONArray("stops")
                       require(stops.length() in 1..50) { "Expected 1-50 stops" }
                       for (i in 0 until stops.length()) {
@@ -121,31 +228,32 @@ jobs:
                   }
                   val hereJson = incoming.getStringExtra("here_json")
                   val request = ++routeRequestId
-                  applyTaskerRouteWhenReady(route, stops, hereJson, request, 0)
+                  applyTaskerRouteWhenReady(route, stops, hereJson, request, 0, slot)
               }
  
               private fun applyTaskerRouteWhenReady(route: org.json.JSONObject, stops: org.json.JSONArray,
-                                                    hereJson: String?, request: Int, attempt: Int) {
+                                                    hereJson: String?, request: Int, attempt: Int, slot: String) {
                   if (request != routeRequestId || isFinishing || isDestroyed) return
                   val aidl = mAidlHelper
-                  if (aidl == null || !(aidl.addMapLayer(taskerRouteLayer, "AM Delivery Route", 5.5f, null, true) ||
-                          aidl.updateMapLayer(taskerRouteLayer, "AM Delivery Route", 5.5f, null, true))) {
+                  val taskerRouteLayer = layerId(slot)
+                  if (aidl == null || !(aidl.addMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true) ||
+                          aidl.updateMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true))) {
                       if (attempt < 30) {
                           android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                              applyTaskerRouteWhenReady(route, stops, hereJson, request, attempt + 1)
+                              applyTaskerRouteWhenReady(route, stops, hereJson, request, attempt + 1, slot)
                           }, 500)
                       } else Toast.makeText(this, "OsmAnd service unavailable", Toast.LENGTH_LONG).show()
                       return
                   }
-                  val previousCount = getPreferences(MODE_PRIVATE).getInt("am_stop_count", 0)
-                  for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "am_stop_$n")
-                  val blue = android.graphics.Color.rgb(25, 118, 210)
+                  val previousCount = routePrefs().getInt("count_" + slot, 0)
+                  for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "${slotKey(slot)}_stop_$n")
+                  val blue = routeColor(slot)
                   var successful = 0
                   for (i in 0 until stops.length()) {
                       val n = i + 1
                       val stop = stops.getJSONObject(i)
                       val address = stop.getString("address")
-                      val iconFile = java.io.File(filesDir, "route_icons/am_stop_$n.png")
+                      val iconFile = java.io.File(filesDir, "route_icons/${slotKey(slot)}_stop_$n.png")
                       iconFile.parentFile?.mkdirs()
                       val bitmap = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
                       val canvas = android.graphics.Canvas(bitmap)
@@ -164,20 +272,20 @@ jobs:
                           this, "net.osmand.osmandapidemo.fileprovider", iconFile)
                       grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                       grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                      if (aidl.addMapPoint(taskerRouteLayer, "am_stop_$n", "", address,
-                              "AM Stop $n", blue,
+                      if (aidl.addMapPoint(taskerRouteLayer, "${slotKey(slot)}_stop_$n", "", address,
+                              "$slot Stop $n", blue,
                               ALatLon(stop.getDouble("lat"), stop.getDouble("lon")),
                               listOf("Stop $n", address),
                               mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))) successful++
                   }
-                  getPreferences(MODE_PRIVATE).edit().putInt("am_stop_count", stops.length()).apply()
+                  routePrefs().edit().putInt("count_" + slot, stops.length()).apply()
                   var roadFollow = false
                   try {
                       val road = hereRoadPoints(hereJson, stops.length() - 1)
                       roadFollow = road != null
-                      val gpx = java.io.File(filesDir, "tasker_am_overview.gpx")
+                      val gpx = java.io.File(filesDir, gpxName(slot))
                       val xml = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
-                          "<gpx version=\"1.1\" creator=\"Tasker Route Demo\" xmlns=\"http://www.topografix.com/GPX/1/1\"><trk><name>AM Overview</name><trkseg>")
+                          "<gpx version=\"1.1\" creator=\"Tasker Route Demo\" xmlns=\"http://www.topografix.com/GPX/1/1\"><trk><name>$slot Overview</name><trkseg>")
                       if (road != null) {
                           for (point in road) xml.append("<trkpt lat=\"").append(point.first)
                               .append("\" lon=\"").append(point.second).append("\"/>")
@@ -194,13 +302,15 @@ jobs:
                           this, "net.osmand.osmandapidemo.fileprovider", gpx)
                       grantUriPermission("net.osmand.plus", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                       grantUriPermission("net.osmand", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                      aidl.removeGpx("tasker_am_overview.gpx")
-                      aidl.importGpxFromUri(uri, "tasker_am_overview.gpx", "blue", true)
+                      aidl.removeGpx(gpxName(slot))
+                      aidl.importGpxFromUri(uri, gpxName(slot), gpxColor(slot), true)
                   } catch (e: Exception) {
                       android.util.Log.e("TaskerRoute", "GPX overview import failed", e)
                   }
+                  routePrefs().edit().putString("json_" + slot, route.toString())
+                      .putBoolean("visible_" + slot, true).apply()
                   val mode = if (roadFollow) "HERE roads" else "straight-line fallback"
-                  Toast.makeText(this, "AM route: $successful/${stops.length()} markers; $mode", Toast.LENGTH_LONG).show()
+                  Toast.makeText(this, "$slot route: $successful/${stops.length()} markers; $mode", Toast.LENGTH_LONG).show()
                   val osmandIntent = packageManager.getLaunchIntentForPackage("net.osmand.plus")
                       ?: packageManager.getLaunchIntentForPackage("net.osmand")
                   if (osmandIntent != null) {
@@ -242,7 +352,7 @@ jobs:
           assert '</paths>' in f
           f=f.replace('</paths>','    <files-path name="route_files" path="." />\n</paths>')
           fp.write_text(f)
-          print('Build 11 HERE flexible-polyline route patch applied')
+          print('Build 12 multi-slot HERE route patch applied')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
