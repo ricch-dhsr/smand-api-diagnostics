@@ -557,6 +557,28 @@ jobs:
           p.write_text(s)
           print('Build 12.4 patch applied successfully')
           PYCODE
+      - name: Apply Build 12.5 small-icon marker experiment
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+ 
+          p = Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/OsmAndAidlHelper.java')
+          s = p.read_text()
+ 
+          # Both addMapLayer and updateMapLayer create an AMapLayer.
+          # Apply small-icon zoom bounds only to our Tasker route layers.
+          old = 'layer.setImagePoints(imagePoints);'
+          new = '''layer.setImagePoints(imagePoints);
+                if (imagePoints && id != null && id.startsWith("tasker_route_")) {
+                    layer.setSmallPointZoomBounds(7, 22);
+                    layer.setBigPointZoomBounds(23, 23);
+                }'''
+ 
+          assert s.count(old) == 2, 'Expected two layer constructors (add/update)'
+          s = s.replace(old, new)
+          p.write_text(s)
+          print('Build 12.5: Tasker routes use SMALL_ICON at zoom 7-22')
+          PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
