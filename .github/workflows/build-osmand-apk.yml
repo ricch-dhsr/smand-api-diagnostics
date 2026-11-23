@@ -444,7 +444,7 @@ jobs:
           s=s.replace(needle,feature+needle,1)
           needle='        mAidlHelper = OsmAndAidlHelper(this.application, this)'
           assert s.count(needle)==1
-          s=s.replace(needle,needle+'\n        routeDiag("onCreate after AIDL helper construction");\n        mAidlHelper.setTaskerConnectedCallback(object : Runnable { override fun run() { onTaskerOsmandConnected() } });\n        acceptTaskerRoute(intent)',1)
+          s=s.replace(needle,needle+'\n        routeDiag("onCreate after AIDL helper construction");\n        mAidlHelper?.setTaskerConnectedCallback(object : Runnable { override fun run() { onTaskerOsmandConnected() } });\n        acceptTaskerRoute(intent)',1)
           p.write_text(s)
           helper=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/OsmAndAidlHelper.java')
           h=helper.read_text()
