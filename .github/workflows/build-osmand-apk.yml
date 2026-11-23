@@ -579,6 +579,40 @@ jobs:
           p.write_text(s)
           print('Build 12.5: Tasker routes use SMALL_ICON at zoom 7-22')
           PYCODE
+      - name: Apply Build 12.6 marker configuration diagnostics
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          helper = Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/OsmAndAidlHelper.java')
+          s = helper.read_text()
+          needle = 'layer.setBigPointZoomBounds(23, 23);'
+          assert s.count(needle) == 2, 'Build 12.5 bounds missing from add/update methods'
+          replacement = '''layer.setBigPointZoomBounds(23, 23);
+                    android.util.Log.i("TaskerMarkerDiag", "CONFIG id=" + id +
+                        " imagePoints=" + layer.isImagePoints() +
+                        " small=" + layer.getSmallPointMinZoom() + "-" + layer.getSmallPointMaxZoom() +
+                        " big=" + layer.getBigPointMinZoom() + "-" + layer.getBigPointMaxZoom());'''
+          s = s.replace(needle, replacement)
+          helper.write_text(s)
+ 
+          # Persist the configured layer values in the existing diagnostic log,
+          # not just Logcat, so a Tasker user can inspect them afterward.
+          activity = Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/MainActivity.kt')
+          a = activity.read_text()
+          needle = 'routeDiag("route replacement slot=" + slot + " iconRevision=" + revision)'
+          assert a.count(needle) == 1
+          a = a.replace(needle, needle + '''
+                  routeDiag("Build12.6 marker-config requested slot=" + slot +
+                      " imagePoints=true smallZoom=7..22 bigZoom=23..23" +
+                      " layer=" + taskerRouteLayer)''')
+          needle = 'routeDiag("visibility slot=" + slot + " requested=" + visible +'
+          assert a.count(needle) == 1
+          a = a.replace(needle, '''routeDiag("Build12.6 visibility marker-config slot=" + slot +
+                      " imagePoints=true smallZoom=7..22 bigZoom=23..23")
+                  ''' + needle)
+          activity.write_text(a)
+          print('Build 12.6 diagnostic instrumentation applied')
+          PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
