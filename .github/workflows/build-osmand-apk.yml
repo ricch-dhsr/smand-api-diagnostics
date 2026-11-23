@@ -524,11 +524,11 @@ jobs:
                       (incoming.getStringExtra("marker_text_size")?.toFloatOrNull() ?: 0f).coerceIn(0f, 400f))
                   if (incoming.hasExtra("route_color")) {''')
           change('''                  if (aidl == null || !(aidl.addMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true) ||
-                          aidl.updateMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true))) {''', '''                  if (aidl == null || !aidl.isTaskerServiceConnected()) {''')
+                          aidl.updateMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true))) {''', '''                  if (aidl?.isTaskerServiceConnected() != true) {''')
           change('''                  val previousCount = routePrefs().getInt("count_" + slot, 0)
                   for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "${slotKey(slot)}_stop_$n")''', '''                  // Replace the entire marker layer to remove all previous markers.
                   aidl?.removeMapLayer(taskerRouteLayer)
-                  if (!aidl?.addMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true)) {
+                  if (aidl?.addMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true) != true) {
                       routeDiag("route replacement addMapLayer failed slot=" + slot)
                       Toast.makeText(this, "Unable to replace " + slot + " marker layer", Toast.LENGTH_LONG).show()
                       return
