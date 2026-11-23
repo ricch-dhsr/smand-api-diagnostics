@@ -551,6 +551,8 @@ jobs:
                   }''')
           change('if (aidl.addMapPoint(taskerRouteLayer,', 'if (aidl?.addMapPoint(taskerRouteLayer,')
           change('mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))) successful++', 'mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString())) == true) successful++')
+          change('aidl.removeGpx(gpxName(slot))', 'aidl?.removeGpx(gpxName(slot))')
+          change('aidl.importGpxFromUri(uri, gpxName(slot), gpxColor(slot), true)', 'aidl?.importGpxFromUri(uri, gpxName(slot), gpxColor(slot), true)')
           p.write_text(s)
           print('Build 12.4 patch applied successfully')
           PYCODE
