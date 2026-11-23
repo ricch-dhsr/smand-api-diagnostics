@@ -444,7 +444,7 @@ jobs:
           s=s.replace(needle,feature+needle,1)
           needle='        mAidlHelper = OsmAndAidlHelper(this.application, this)'
           assert s.count(needle)==1
-          s=s.replace(needle,needle+'\n        routeDiag("onCreate after AIDL helper construction");\n        mAidlHelper?.setTaskerConnectedCallback(object : Runnable { override fun run() { onTaskerOsmandConnected() } });\n        acceptTaskerRoute(intent)',1)
+          s=s.replace(needle,needle+'\n        routeDiag("onCreate after AIDL helper construction");\n        mAidlHelper.setTaskerConnectedCallback(object : Runnable { override fun run() { onTaskerOsmandConnected() } });\n        acceptTaskerRoute(intent)',1)
           p.write_text(s)
           helper=Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/OsmAndAidlHelper.java')
           h=helper.read_text()
@@ -473,6 +473,84 @@ jobs:
           f=f.replace('</paths>','    <files-path name="route_files" path="." />\n</paths>')
           fp.write_text(f)
           print('Build 12.3 persistent diagnostic logging patch applied')
+          PYCODE
+      - name: Apply Build 12.4 marker sizing and route replacement
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path('source/osmand-api-demo-master/OsmAnd-api-sample/app/src/main/java/net/osmand/osmandapidemo/MainActivity.kt')
+          s = p.read_text()
+          def change(old, new):
+              global s
+              # Normalize indentation of embedded Kotlin literals.
+              def normalized(value):
+                  lines = value.split('\n')
+                  threshold = len(lines[0]) - len(lines[0].lstrip(' '))
+                  return '\n'.join(line[10:] if len(line) - len(line.lstrip(' ')) >= threshold and threshold >= 10 else line
+                                   for line in lines)
+              if s.count(old) != 1:
+                  old, new = normalized(old), normalized(new)
+              assert s.count(old) == 1, 'Expected one match for: ' + old[:100]
+              s = s.replace(old, new, 1)
+ 
+          change('              private fun drawRouteMarker(slot: String, n: Int, iconFile: java.io.File) {', '''              private fun markerSize(slot: String): Int = routePrefs().getInt("marker_size_" + slot, 256).coerceIn(96, 512)
+              private fun markerTextSize(slot: String, n: Int): Float {
+                  val explicit = routePrefs().getFloat("marker_text_size_" + slot, 0f)
+                  return if (explicit > 0f) explicit else (if (n < 10) 160f else 128f) * markerSize(slot) / 256f
+              }
+              private fun markerIconFile(slot: String, n: Int): java.io.File {
+                  val revision = routePrefs().getLong("icon_revision_" + slot, 0L)
+                  return java.io.File(filesDir, "route_icons/${slotKey(slot)}_stop_${n}_v${revision}.png")
+              }
+              private fun drawRouteMarker(slot: String, n: Int, iconFile: java.io.File) {''')
+          change('                  val bitmap = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)', '''                  val size = markerSize(slot)
+                  val center = size / 2f
+                  val scale = size / 256f
+                  val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)''')
+          change('''                  val radius = markerRadius(slot)
+                  canvas.drawCircle(128f, 128f, radius, circle)
+                  val stroke = markerBorderWidth(slot)''', '''                  val stroke = markerBorderWidth(slot) * scale
+                  val radius = (markerRadius(slot) * scale).coerceIn(1f, center - stroke / 2f - 1f)
+                  canvas.drawCircle(center, center, radius, circle)''')
+          change('canvas.drawCircle(128f, 128f, radius - stroke / 2f, circle)', 'canvas.drawCircle(center, center, radius - stroke / 2f, circle)')
+          change('''                  number.textSize = if (n < 10) 160f else 128f
+                  canvas.drawText(n.toString(), 128f, 128f - (number.ascent() + number.descent()) / 2f, number)''', '''                  number.textSize = markerTextSize(slot, n)
+                  canvas.drawText(n.toString(), center, center - (number.ascent() + number.descent()) / 2f, number)''')
+          change('val iconFile = java.io.File(filesDir, "route_icons/" + slotKey(slot) + "_stop_" + n + ".png")', 'val iconFile = markerIconFile(slot, n)')
+          change('val iconFile = java.io.File(filesDir, "route_icons/${slotKey(slot)}_stop_$n.png")', 'val iconFile = markerIconFile(slot, n)')
+          change('                  if (incoming.hasExtra("route_color")) {', '''                  if (incoming.hasExtra("marker_size")) settings.putInt("marker_size_" + slot,
+                      (incoming.getStringExtra("marker_size")?.toIntOrNull() ?: 256).coerceIn(96, 512))
+                  if (incoming.hasExtra("marker_text_size")) settings.putFloat("marker_text_size_" + slot,
+                      (incoming.getStringExtra("marker_text_size")?.toFloatOrNull() ?: 0f).coerceIn(0f, 400f))
+                  if (incoming.hasExtra("route_color")) {''')
+          change('''                  if (aidl == null || !(aidl.addMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true) ||
+                          aidl.updateMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true))) {''', '''                  if (aidl == null || !aidl.isTaskerServiceConnected()) {''')
+          change('''                  val previousCount = routePrefs().getInt("count_" + slot, 0)
+                  for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "${slotKey(slot)}_stop_$n")''', '''                  // Replace the entire marker layer to remove all previous markers.
+                  aidl.removeMapLayer(taskerRouteLayer)
+                  if (!aidl.addMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true)) {
+                      routeDiag("route replacement addMapLayer failed slot=" + slot)
+                      Toast.makeText(this, "Unable to replace " + slot + " marker layer", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  // A unique image URI on every install avoids OsmAnd's cached icons.
+                  val revision = System.currentTimeMillis()
+                  routePrefs().edit().putLong("icon_revision_" + slot, revision).apply()
+                  routeDiag("route replacement slot=" + slot + " iconRevision=" + revision)''')
+          change('''                  routePrefs().edit().putString("json_" + slot, route.toString())
+                      .putBoolean("visible_" + slot, true).apply()''', '''                  routePrefs().edit().putString("json_" + slot, route.toString())
+                      .putBoolean("visible_" + slot, true).apply()
+                  // Keep only the current generation of this slot's icon files.
+                  try {
+                      java.io.File(filesDir, "route_icons").listFiles()?.forEach { file ->
+                          if (file.name.startsWith(slotKey(slot) + "_stop_") &&
+                              !file.name.endsWith("_v${revision}.png")) file.delete()
+                      }
+                  } catch (e: Exception) {
+                      routeDiag("icon cleanup failed slot=" + slot + " type=" + e.javaClass.name)
+                  }''')
+          p.write_text(s)
+          print('Build 12.4 patch applied successfully')
           PYCODE
       - name: Set up Java
         uses: actions/setup-java@v4
