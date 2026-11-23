@@ -549,8 +549,8 @@ jobs:
                   } catch (e: Exception) {
                       routeDiag("icon cleanup failed slot=" + slot + " type=" + e.javaClass.name)
                   }''')
-                  change('if (aidl.addMapPoint(taskerRouteLayer,', 'if (aidl?.addMapPoint(taskerRouteLayer,')
-            change('mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))) successful++', 'mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString())) == true) successful++')
+          change('if (aidl.addMapPoint(taskerRouteLayer,', 'if (aidl?.addMapPoint(taskerRouteLayer,')
+          change('mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString()))) successful++', 'mapOf(AMapPoint.POINT_IMAGE_URI_PARAM to uri.toString())) == true) successful++')
           p.write_text(s)
           print('Build 12.4 patch applied successfully')
           PYCODE
