@@ -527,7 +527,7 @@ jobs:
                           aidl.updateMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true))) {''', '''                  if (aidl == null || !aidl.isTaskerServiceConnected()) {''')
           change('''                  val previousCount = routePrefs().getInt("count_" + slot, 0)
                   for (n in 1..previousCount) aidl.removeMapPoint(taskerRouteLayer, "${slotKey(slot)}_stop_$n")''', '''                  // Replace the entire marker layer to remove all previous markers.
-                  aidl.removeMapLayer(taskerRouteLayer)
+                  aidl?.removeMapLayer(taskerRouteLayer)
                   if (!aidl.addMapLayer(taskerRouteLayer, slot + " Delivery Route", 5.5f, null, true)) {
                       routeDiag("route replacement addMapLayer failed slot=" + slot)
                       Toast.makeText(this, "Unable to replace " + slot + " marker layer", Toast.LENGTH_LONG).show()
